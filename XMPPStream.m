@@ -18,8 +18,8 @@
 
 // Define the debugging state
 #define DEBUG_SEND      YES
-#define DEBUG_RECV_PRE  YES  // Prints data before going to xmpp parser
-#define DEBUG_RECV_POST NO   // Prints data as it comes out of xmpp parser
+#define DEBUG_RECV_PRE  NO   // Prints data before going to xmpp parser
+#define DEBUG_RECV_POST YES  // Prints data as it comes out of xmpp parser
 
 #define DDLogSend(format, ...)     do{ if(DEBUG_SEND)      NSLog((format), ##__VA_ARGS__); }while(0)
 #define DDLogRecvPre(format, ...)  do{ if(DEBUG_RECV_PRE)  NSLog((format), ##__VA_ARGS__); }while(0)
@@ -49,12 +49,6 @@
 #define STATE_BINDING          8
 #define STATE_START_SESSION    9
 #define STATE_CONNECTED       10
-
-#if TARGET_OS_IPHONE
-  #define SOCKET_BUFFER_SIZE 512  // bytes
-#else
-  #define SOCKET_BUFFER_SIZE 1024 // bytes
-#endif
 
 NSString *const XMPPStreamErrorDomain = @"XMPPStreamErrorDomain";
 
@@ -200,9 +194,8 @@ enum XMPPStreamFlags
 	[asyncSocket setDelegate:nil];
 	[asyncSocket disconnect];
 	[asyncSocket release];
-	[socketBuffer release];
 	
-	[parser setDelegate:nil];
+	[parser stop];
 	[parser release];
 	
 	[hostName release];
@@ -511,15 +504,8 @@ enum XMPPStreamFlags
 		// Initialize the XML stream
 		[self sendOpeningNegotiation];
 		
-		// Initialize socket buffer
-		socketBuffer = [[NSMutableData alloc] initWithLength:SOCKET_BUFFER_SIZE];
-		
 		// And start reading in the server's XML stream
-		[asyncSocket readDataWithTimeout:TIMEOUT_READ_START
-		                          buffer:socketBuffer
-		                    bufferOffset:0
-		                       maxLength:[socketBuffer length]
-		                             tag:TAG_READ_START];
+		[asyncSocket readDataWithTimeout:TIMEOUT_READ_START tag:TAG_READ_START];
 	}
 	else
 	{
@@ -1145,6 +1131,8 @@ enum XMPPStreamFlags
 **/
 - (void)sendOpeningNegotiation
 {
+	BOOL isRenegotiation = NO;
+	
 	if (state == STATE_CONNECTING)
 	{
 		// TCP connection was just opened - We need to include the opening XML stanza
@@ -1162,8 +1150,12 @@ enum XMPPStreamFlags
 	
 	if (state != STATE_CONNECTING)
 	{
-		// We're restarting our negotiation, so we need to reset the parser.
-		[parser setDelegate:nil];
+		// We're restarting our negotiation.
+		// This happens, for example, after securing the connection with SSL/TLS.
+		isRenegotiation = YES;
+		
+		// Since we're restarting the XML stream, we need to reset the parser.
+		[parser stop];
 		[parser release];
 		
 		parser = [[XMPPParser alloc] initWithDelegate:self];
@@ -1231,6 +1223,13 @@ enum XMPPStreamFlags
 	
 	// Update status
 	state = STATE_OPENING;
+	
+	// For a reneogitation, we need to manually read from the socket.
+	// This is because we had to reset our parser, which is usually used to continue the reading process.
+	if (isRenegotiation)
+	{
+		[asyncSocket readDataWithTimeout:TIMEOUT_READ_START tag:TAG_READ_START];
+	}
 }
 
 /**
@@ -1705,18 +1704,8 @@ enum XMPPStreamFlags
 	// Initialize the XML stream
 	[self sendOpeningNegotiation];
 	
-	// Initialize socket buffer
-	if (socketBuffer == nil)
-	{
-		socketBuffer = [[NSMutableData alloc] initWithLength:SOCKET_BUFFER_SIZE];
-	}
-	
 	// And start reading in the server's XML stream
-	[asyncSocket readDataWithTimeout:TIMEOUT_READ_START
-	                          buffer:socketBuffer
-	                    bufferOffset:0
-	                       maxLength:[socketBuffer length]
-	                             tag:TAG_READ_START];
+	[asyncSocket readDataWithTimeout:TIMEOUT_READ_START tag:TAG_READ_START];
 }
 
 - (void)onSocketDidSecure:(AsyncSocket *)sock
@@ -1741,29 +1730,6 @@ enum XMPPStreamFlags
 	numberOfBytesReceived += [data length];
 	
 	[parser parseData:data];
-	
-	// Continue reading for XML elements.
-	// Double-check to make sure the socket is still connected first though.
-	// The delegate could have called disconnect in one of the delegate methods (invoked during parseData above).
-	if ([asyncSocket isConnected])
-	{
-		if(state == STATE_OPENING)
-		{
-			[asyncSocket readDataWithTimeout:TIMEOUT_READ_START
-			                          buffer:socketBuffer
-			                    bufferOffset:0
-			                       maxLength:[socketBuffer length]
-			                             tag:TAG_READ_START];
-		}
-		else
-		{
-			[asyncSocket readDataWithTimeout:TIMEOUT_READ_STREAM
-			                          buffer:socketBuffer
-			                    bufferOffset:0
-			                       maxLength:[socketBuffer length]
-			                             tag:TAG_READ_STREAM];
-		}
-	}
 }
 
 /**
@@ -1795,16 +1761,12 @@ enum XMPPStreamFlags
 	// Update state
 	state = STATE_DISCONNECTED;
 	
-	// Release socket buffer
-	[socketBuffer release];
-	socketBuffer = nil;
-	
 	// Update configuration
 	[self setIsSecure:NO];
 	[self setIsAuthenticated:NO];
 	
 	// Release the parser (to free underlying resources)
-	[parser setDelegate:nil];
+	[parser stop];
 	[parser release];
 	parser = nil;
 	
@@ -2056,6 +2018,20 @@ enum XMPPStreamFlags
 	[multicastDelegate xmppStream:self didReceiveError:error];
 	
 	[asyncSocket disconnect];
+}
+
+- (void)xmppParser:(XMPPParser *)sender didParseDataOfLength:(NSUInteger)length
+{
+	// The chunk we read has now been fully parsed.
+	// Continue reading for XML elements.
+	if(state == STATE_OPENING)
+	{
+		[asyncSocket readDataWithTimeout:TIMEOUT_READ_START tag:TAG_READ_START];
+	}
+	else
+	{
+		[asyncSocket readDataWithTimeout:TIMEOUT_READ_STREAM tag:TAG_READ_STREAM];
+	}
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////

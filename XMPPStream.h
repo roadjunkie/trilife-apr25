@@ -39,7 +39,6 @@ typedef enum XMPPStreamErrorCode XMPPStreamErrorCode;
 	
 	int state;
 	AsyncSocket *asyncSocket;
-	NSMutableData *socketBuffer;
 	
 	UInt64 numberOfBytesSent;
 	UInt64 numberOfBytesReceived;
